@@ -1,7 +1,7 @@
 import os
 import json
 from argparse import ArgumentParser
-from typing import List
+from typing import List, Dict, Any
 
 import torch
 import torch.distributed as dist
@@ -146,12 +146,29 @@ def main(
         with open(input_file) as f:
             prompts = [line.strip() for line in f.readlines()]
         assert len(prompts) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
-        prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
-        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
-        completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
-        for prompt, completion in zip(prompts, completions):
-            print("Prompt:", prompt)
-            print("Completion:", completion)
+        
+        try:
+            from billing_templates import get_billing_response
+            billing_enabled = True
+        except ImportError:
+            billing_enabled = False
+        
+        processed_results = []
+        for prompt in prompts:
+            if billing_enabled:
+                billing_response = get_billing_response(prompt)
+                if billing_response:
+                    processed_results.append({"prompt": prompt, "completion": billing_response})
+                    continue
+            
+            prompt_tokens = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True)
+            completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+            completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
+            processed_results.append({"prompt": prompt, "completion": completion})
+        
+        for result in processed_results:
+            print("Prompt:", result["prompt"])
+            print("Completion:", result["completion"])
             print()
 
     if world_size > 1:
