@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Tuple, Optional, Literal
+from typing import Tuple, Optional, Literal, List, Union
 
 import torch
 from torch import nn
@@ -451,7 +451,7 @@ class MLA(nn.Module):
             mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
 
         Returns:
-            torch.Tensor: Output tensor with the same shape as the input.
+            Tuple[torch.Tensor, torch.Tensor]: Output tensor and attention weights tensor.
         """
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
@@ -484,14 +484,14 @@ class MLA(nn.Module):
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
         if mask is not None:
             scores += mask.unsqueeze(1)
-        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
+        attention_weights = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
         if attn_impl == "naive":
-            x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
+            x = torch.einsum("bsht,bthd->bshd", attention_weights, self.v_cache[:bsz, :end_pos])
         else:
-            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+            x = torch.einsum("bsht,btc->bshc", attention_weights, self.kv_cache[:bsz, :end_pos])
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
         x = self.wo(x.flatten(2))
-        return x
+        return x, attention_weights
 
 
 class MLP(nn.Module):
@@ -714,7 +714,7 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)
 
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the Transformer block.
 
@@ -725,11 +725,12 @@ class Block(nn.Module):
             mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
 
         Returns:
-            torch.Tensor: Output tensor after block computation.
+            Tuple[torch.Tensor, torch.Tensor]: Output tensor and attention weights tensor.
         """
-        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+        attn_output, attention_weights = self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+        x = x + attn_output
         x = x + self.ffn(self.ffn_norm(x))
-        return x
+        return x, attention_weights
 
 
 class Transformer(nn.Module):
@@ -766,16 +767,19 @@ class Transformer(nn.Module):
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0, return_attention: bool = False):
         """
         Forward pass for the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
             start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
+            return_attention (bool, optional): Whether to return attention weights. Defaults to False.
 
         Returns:
-            torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
+            Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]: 
+                If return_attention=False: Logits tensor of shape (batch_size, vocab_size).
+                If return_attention=True: Tuple of (logits tensor, list of attention weight tensors).
         """
         seqlen = tokens.size(1)
         h = self.embed(tokens)
@@ -783,14 +787,22 @@ class Transformer(nn.Module):
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+        
+        attention_weights = []
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            h, attn_weights = layer(h, start_pos, freqs_cis, mask)
+            if return_attention:
+                attention_weights.append(attn_weights)
+        
         h = self.norm(h)[:, -1]
         logits = self.head(h)
         if world_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(world_size)]
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
+        
+        if return_attention:
+            return logits, attention_weights
         return logits
 
 

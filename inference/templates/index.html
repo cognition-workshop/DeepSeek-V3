@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek-V3 Attention Visualization</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2.22.0/plotly.min.js"></script>
+    <style>
+        .attention-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .attention-heatmap {
+            flex: 1;
+            min-width: 300px;
+            height: 500px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .layer-selector {
+            margin-bottom: 15px;
+        }
+        .head-selector {
+            margin-bottom: 15px;
+        }
+        .sample-container {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 500px;
+            font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4 mb-5">
+        <h1 class="mb-4">DeepSeek-V3 Attention Visualization</h1>
+        
+        <div class="row mb-4">
+            <div class="col">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Input Samples</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="samples">
+                            <div class="sample-container">
+                                <div class="mb-3">
+                                    <label for="sample1" class="form-label">Sample 1</label>
+                                    <textarea id="sample1" class="form-control" rows="3">Tell me about deep learning.</textarea>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between mt-3">
+                            <button id="add-sample" class="btn btn-outline-primary">Add Sample</button>
+                            <button id="visualize" class="btn btn-primary">Visualize Attention</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="visualization" style="display: none;">
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <div class="layer-selector">
+                        <label for="layer-select" class="form-label">Layer:</label>
+                        <select id="layer-select" class="form-select"></select>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="head-selector">
+                        <label for="head-select" class="form-label">Attention Head:</label>
+                        <select id="head-select" class="form-select"></select>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="attention-visualizations">
+                <div class="attention-container" id="attention-heatmaps"></div>
+            </div>
+        </div>
+        
+        <div id="loading" class="loading" style="display: none;">
+            Processing... This may take a few moments.
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/visualization.js') }}"></script>
+</body>
+</html>
