@@ -1,44 +1,49 @@
 import os
-import faiss
 import numpy as np
 from typing import List, Dict, Tuple, Optional
-from sentence_transformers import SentenceTransformer
+import torch
+from transformers import AutoModel, AutoTokenizer
 
 class VectorDB:
     """
-    Vector database for storing and retrieving text embeddings.
+    Simple vector database for storing and retrieving text embeddings.
+    Uses cosine similarity for retrieval without requiring external dependencies.
     """
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "bert-base-uncased"):
         """
         Initialize the vector database.
 
         Args:
-            model_name (str): Name of the SentenceTransformer model to use for embeddings.
-                             Defaults to "all-MiniLM-L6-v2".
+            model_name (str): Name of the model to use for embeddings.
+                             Defaults to "bert-base-uncased".
         """
-        self.model = SentenceTransformer(model_name)
-        self.dimension = self.model.get_sentence_embedding_dimension()
-        self.index = None
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
         self.chunks = []
         self.embeddings = None
         
     def create_index(self, chunks: List[str]) -> None:
         """
-        Create a FAISS index from text chunks.
+        Create embeddings for text chunks.
 
         Args:
             chunks (List[str]): List of text chunks to index.
         """
         self.chunks = chunks
         
-        self.embeddings = self.model.encode(chunks)
+        embeddings = []
+        for chunk in chunks:
+            inputs = self.tokenizer(chunk, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            
+            embeddings.append(outputs.last_hidden_state.mean(dim=1).squeeze().numpy())
         
-        self.index = faiss.IndexFlatL2(self.dimension)
-        self.index.add(np.array(self.embeddings).astype('float32'))
+        self.embeddings = np.array(embeddings)
         
     def search(self, query: str, top_k: int = 3) -> List[Tuple[int, str, float]]:
         """
-        Search for similar chunks to a query.
+        Search for similar chunks to a query using cosine similarity.
 
         Args:
             query (str): Query text.
@@ -47,51 +52,63 @@ class VectorDB:
         Returns:
             List[Tuple[int, str, float]]: List of tuples containing (chunk_index, chunk_text, similarity_score).
         """
-        if self.index is None or not self.chunks:
+        if self.embeddings is None or not self.chunks:
             return []
         
-        query_embedding = self.model.encode([query])
+        inputs = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
         
-        distances, indices = self.index.search(np.array(query_embedding).astype('float32'), top_k)
+        query_embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+        
+        similarities = []
+        for i, embedding in enumerate(self.embeddings):
+            query_norm = np.linalg.norm(query_embedding)
+            embedding_norm = np.linalg.norm(embedding)
+            
+            if query_norm > 0 and embedding_norm > 0:
+                similarity = np.dot(query_embedding, embedding) / (query_norm * embedding_norm)
+                similarities.append((i, similarity))
+            else:
+                similarities.append((i, 0.0))
+        
+        similarities.sort(key=lambda x: x[1], reverse=True)
         
         results = []
-        for i, idx in enumerate(indices[0]):
-            if idx < len(self.chunks) and idx >= 0:  # Valid index check
-                results.append((int(idx), self.chunks[idx], float(distances[0][i])))
+        for i in range(min(top_k, len(similarities))):
+            idx, score = similarities[i]
+            results.append((idx, self.chunks[idx], float(score)))
                 
         return results
     
     def save_index(self, path: str) -> None:
         """
-        Save the FAISS index and chunks to disk.
+        Save chunks and embeddings to disk.
 
         Args:
-            path (str): Directory path to save the index.
+            path (str): Directory path to save the data.
         """
-        if self.index is None:
+        if self.embeddings is None:
             return
             
         os.makedirs(path, exist_ok=True)
-        faiss.write_index(self.index, os.path.join(path, "index.faiss"))
         
-        if self.embeddings is not None:
-            np.save(os.path.join(path, "embeddings.npy"), self.embeddings)
+        np.save(os.path.join(path, "embeddings.npy"), self.embeddings)
         with open(os.path.join(path, "chunks.txt"), "w", encoding="utf-8") as f:
             for chunk in self.chunks:
                 f.write(chunk + "\n===CHUNK_SEPARATOR===\n")
                 
     def load_index(self, path: str) -> bool:
         """
-        Load a FAISS index and chunks from disk.
+        Load chunks and embeddings from disk.
 
         Args:
-            path (str): Directory path to load the index from.
+            path (str): Directory path to load the data from.
 
         Returns:
             bool: True if loading was successful, False otherwise.
         """
         try:
-            self.index = faiss.read_index(os.path.join(path, "index.faiss"))
             self.embeddings = np.load(os.path.join(path, "embeddings.npy"))
             
             with open(os.path.join(path, "chunks.txt"), "r", encoding="utf-8") as f:

@@ -4,6 +4,4 @@ transformers==4.46.3
 safetensors==0.4.5
 flask==2.3.3
 pypdf2==3.0.1
-sentence-transformers==2.2.2
-faiss-cpu==1.7.4
 flask-bootstrap==3.3.7.1
