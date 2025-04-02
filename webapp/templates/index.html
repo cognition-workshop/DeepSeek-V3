@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Support Ticket Analyzer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .container {
+            background-color: #f9f9f9;
+            border-radius: 5px;
+            padding: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            resize: vertical;
+            font-family: inherit;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .result {
+            margin-top: 20px;
+            border-top: 1px solid #ddd;
+            padding-top: 20px;
+        }
+        .summary {
+            background-color: #e9f7ef;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .sentiment {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .score {
+            font-size: 24px;
+            font-weight: bold;
+            margin-left: 15px;
+            color: #333;
+        }
+        .score-container {
+            background-color: #f1f1f1;
+            border-radius: 4px;
+            padding: 10px 15px;
+            display: inline-block;
+        }
+        .loading {
+            text-align: center;
+            margin: 20px 0;
+            display: none;
+        }
+        .error {
+            color: #d9534f;
+            background-color: #f9eaea;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .meter {
+            height: 20px;
+            position: relative;
+            background: #f3f3f3;
+            border-radius: 25px;
+            padding: 5px;
+            box-shadow: inset 0 -1px 1px rgba(255, 255, 255, 0.3);
+            width: 300px;
+        }
+        .meter > span {
+            display: block;
+            height: 100%;
+            border-radius: 10px;
+            background-color: rgb(43, 194, 83);
+            position: relative;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body>
+    <h1>Customer Support Ticket Analyzer</h1>
+    <div class="container">
+        <form action="/analyze" method="post">
+            <p>Paste your customer support ticket below:</p>
+            <textarea name="ticket_text" placeholder="Enter the customer support ticket text here..." required>{{ original_text if original_text else "" }}</textarea>
+            
+            {% if error %}
+            <div class="error">{{ error }}</div>
+            {% endif %}
+            
+            <button type="submit" id="analyze-btn">Analyze Ticket</button>
+            <div class="loading" id="loading">Processing... This may take a moment.</div>
+        </form>
+        
+        {% if result %}
+        <div class="result">
+            <h2>Analysis Results</h2>
+            
+            <h3>Summary</h3>
+            <div class="summary">
+                {{ summary }}
+            </div>
+            
+            <h3>Sentiment Score</h3>
+            <div class="sentiment">
+                <div class="meter">
+                    <span style="width: {{ sentiment_score * 10 }}%; 
+                           background-color: {% if sentiment_score < 4 %}#d9534f{% elif sentiment_score < 7 %}#f0ad4e{% else %}#5cb85c{% endif %};">
+                    </span>
+                </div>
+                <div class="score">{{ sentiment_score }}/10</div>
+            </div>
+            
+            <p><strong>Score interpretation:</strong>
+            {% if sentiment_score < 4 %}
+                Negative sentiment - customer is unhappy
+            {% elif sentiment_score < 7 %}
+                Neutral sentiment - customer is neither satisfied nor dissatisfied
+            {% else %}
+                Positive sentiment - customer is satisfied
+            {% endif %}
+            </p>
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.querySelector('form');
+            const loading = document.getElementById('loading');
+            const analyzeBtn = document.getElementById('analyze-btn');
+            
+            form.addEventListener('submit', function() {
+                loading.style.display = 'block';
+                analyzeBtn.disabled = true;
+            });
+        });
+    </script>
+</body>
+</html>
