@@ -1,0 +1,22 @@
+{
+  "templates": [
+    {
+      "id": "greeting",
+      "name": "Customer Greeting",
+      "triggers": ["hello", "hi", "hey", "greetings"],
+      "template": "Hello {{customer.name}}! Welcome back to DeepSeek. {{#if customer.recent_activity}}I see you were recently working on {{customer.recent_activity}}.{{/if}} How can I assist you today?"
+    },
+    {
+      "id": "support_inquiry",
+      "name": "Support Inquiry",
+      "triggers": ["help", "support", "assistance", "issue", "problem"],
+      "template": "I understand you need help with {{#if chat_history.last_topic}}{{chat_history.last_topic}}{{else}}something{{/if}}. Let me assist you with that. {{#if customer.support_tickets}}I notice you have {{customer.support_tickets.length}} open support tickets. Would you like me to help with one of those?{{/if}}"
+    },
+    {
+      "id": "billing_question",
+      "name": "Billing Question",
+      "triggers": ["bill", "invoice", "payment", "charge", "subscription", "pricing"],
+      "template": "Regarding your billing inquiry, {{#if customer.subscription}}you are currently on the {{customer.subscription.plan}} plan which renews on {{customer.subscription.renewal_date}}.{{else}}I don't see an active subscription for your account.{{/if}} How can I help you with your billing question?"
+    }
+  ]
+}

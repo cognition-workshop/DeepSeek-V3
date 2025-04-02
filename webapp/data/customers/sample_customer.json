@@ -1,0 +1,24 @@
+{
+  "id": "cust_12345",
+  "name": "John Doe",
+  "email": "john.doe@example.com",
+  "subscription": {
+    "plan": "Pro",
+    "renewal_date": "2024-05-01"
+  },
+  "recent_activity": "API integration project",
+  "support_tickets": [
+    {
+      "id": "ticket_1",
+      "subject": "API rate limits",
+      "status": "open"
+    }
+  ],
+  "chat_history": [
+    {
+      "timestamp": "2024-03-20T14:30:00Z",
+      "topic": "API integration",
+      "sentiment": "neutral"
+    }
+  ]
+}

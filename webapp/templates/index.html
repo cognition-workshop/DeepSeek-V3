@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek Response Templates</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .chat-container {
+            height: 60vh;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #e9ecef;
+            margin-left: auto;
+        }
+        .assistant-message {
+            background-color: #d1e7dd;
+        }
+        .template-badge {
+            font-size: 0.7em;
+            margin-left: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-4">DeepSeek Response Templates</h1>
+        
+        <div class="row mb-4">
+            <div class="col">
+                <div class="input-group">
+                    <span class="input-group-text">Customer ID</span>
+                    <input type="text" id="customer-id" class="form-control" value="sample_customer" placeholder="Enter customer ID">
+                    <button class="btn btn-outline-secondary" type="button" id="load-customer">Load</button>
+                </div>
+            </div>
+            <div class="col">
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="use-templates" checked>
+                    <label class="form-check-label" for="use-templates">Use Templates</label>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row">
+            <div class="col-md-8">
+                <div class="chat-container" id="chat-container"></div>
+                
+                <div class="input-group mb-3">
+                    <input type="text" id="message-input" class="form-control" placeholder="Type your message...">
+                    <button class="btn btn-primary" type="button" id="send-button">Send</button>
+                </div>
+            </div>
+            
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        Customer Information
+                    </div>
+                    <div class="card-body">
+                        <div id="customer-info">
+                            <p>No customer selected</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card mt-3">
+                    <div class="card-header">
+                        Available Templates
+                    </div>
+                    <div class="card-body">
+                        <div id="templates-list">
+                            Loading templates...
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Constants
+        const API_BASE_URL = window.location.origin;
+        
+        // State
+        let customerData = null;
+        let templates = [];
+        
+        // Elements
+        const customerIdInput = document.getElementById('customer-id');
+        const loadCustomerButton = document.getElementById('load-customer');
+        const useTemplatesCheckbox = document.getElementById('use-templates');
+        const chatContainer = document.getElementById('chat-container');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const customerInfoDiv = document.getElementById('customer-info');
+        const templatesListDiv = document.getElementById('templates-list');
+        
+        // Event Listeners
+        loadCustomerButton.addEventListener('click', loadCustomer);
+        sendButton.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+        
+        // Load templates on page load
+        fetchTemplates();
+        
+        // Functions
+        async function fetchTemplates() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/templates`);
+                const data = await response.json();
+                templates = data.templates || [];
+                renderTemplates();
+            } catch (error) {
+                console.error('Error fetching templates:', error);
+                templatesListDiv.innerHTML = '<p class="text-danger">Error loading templates</p>';
+            }
+        }
+        
+        function renderTemplates() {
+            if (templates.length === 0) {
+                templatesListDiv.innerHTML = '<p>No templates available</p>';
+                return;
+            }
+            
+            const templatesList = templates.map(template => `
+                <div class="mb-2">
+                    <strong>${template.name}</strong>
+                    <div><small class="text-muted">Triggers: ${template.triggers.join(', ')}</small></div>
+                </div>
+            `).join('');
+            
+            templatesListDiv.innerHTML = templatesList;
+        }
+        
+        async function loadCustomer() {
+            const customerId = customerIdInput.value.trim();
+            if (!customerId) {
+                alert('Please enter a customer ID');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/customers/${customerId}`);
+                if (!response.ok) {
+                    throw new Error('Customer not found');
+                }
+                
+                customerData = await response.json();
+                renderCustomerInfo();
+                
+                // Also load chat history
+                const historyResponse = await fetch(`${API_BASE_URL}/api/customers/${customerId}/history`);
+                if (historyResponse.ok) {
+                    const historyData = await historyResponse.json();
+                    renderChatHistory(historyData.messages || []);
+                }
+                
+            } catch (error) {
+                console.error('Error loading customer:', error);
+                customerInfoDiv.innerHTML = `<p class="text-danger">${error.message}</p>`;
+            }
+        }
+        
+        function renderCustomerInfo() {
+            if (!customerData) return;
+            
+            const infoHtml = `
+                <p><strong>Name:</strong> ${customerData.name}</p>
+                <p><strong>Email:</strong> ${customerData.email}</p>
+                ${customerData.subscription ? 
+                    `<p><strong>Plan:</strong> ${customerData.subscription.plan}</p>
+                     <p><strong>Renewal:</strong> ${customerData.subscription.renewal_date}</p>` : 
+                    '<p>No active subscription</p>'}
+                <p><strong>Recent Activity:</strong> ${customerData.recent_activity || 'None'}</p>
+                <p><strong>Support Tickets:</strong> ${customerData.support_tickets?.length || 0}</p>
+            `;
+            
+            customerInfoDiv.innerHTML = infoHtml;
+        }
+        
+        function renderChatHistory(messages) {
+            chatContainer.innerHTML = '';
+            
+            messages.forEach(message => {
+                addMessageToChat(message.role, message.content);
+            });
+            
+            // Scroll to bottom
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        function addMessageToChat(role, content, usedTemplate = false) {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message', role === 'user' ? 'user-message' : 'assistant-message');
+            
+            let messageContent = content;
+            if (role === 'assistant' && usedTemplate) {
+                messageContent += '<span class="badge bg-info template-badge">Template</span>';
+            }
+            
+            messageDiv.innerHTML = messageContent;
+            chatContainer.appendChild(messageDiv);
+            
+            // Scroll to bottom
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message) return;
+            
+            const customerId = customerIdInput.value.trim();
+            if (!customerId) {
+                alert('Please enter a customer ID');
+                return;
+            }
+            
+            // Add user message to chat
+            addMessageToChat('user', message);
+            messageInput.value = '';
+            
+            // Send request to API
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/chat`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        customer_id: customerId,
+                        message: message,
+                        use_templates: useTemplatesCheckbox.checked
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to get response');
+                }
+                
+                const data = await response.json();
+                
+                // Add assistant message to chat
+                addMessageToChat('assistant', data.response, data.used_template);
+                
+            } catch (error) {
+                console.error('Error sending message:', error);
+                addMessageToChat('assistant', 'Sorry, there was an error processing your request.');
+            }
+        }
+    </script>
+</body>
+</html>
