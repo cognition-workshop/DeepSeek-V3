@@ -84,6 +84,32 @@ class ModelArgs:
     mscale: float = 1.
 
 
+@dataclass
+class ModelArgsSmall(ModelArgs):
+    """Smaller model configuration with reduced parameters for faster inference."""
+    dim: int = 1024            # Reduced from 2048 in the smallest config
+    inter_dim: int = 5472      # Reduced from 10944
+    moe_inter_dim: int = 704   # Reduced from 1408
+    n_layers: int = 12         # Reduced from 27
+    n_heads: int = 8           # Reduced from 16
+    n_routed_experts: int = 32 # Reduced from 64
+    n_activated_experts: int = 4 # Reduced from 6
+    q_lora_rank: int = 0       # Same as in config_16B.json
+
+
+@dataclass
+class ModelArgsTiny(ModelArgs):
+    """Tiny model configuration for extremely fast inference and testing."""
+    dim: int = 512             # Further reduced
+    inter_dim: int = 2736      # Further reduced
+    moe_inter_dim: int = 352   # Further reduced
+    n_layers: int = 6          # Further reduced
+    n_heads: int = 4           # Further reduced
+    n_routed_experts: int = 16 # Further reduced
+    n_activated_experts: int = 2 # Further reduced
+    q_lora_rank: int = 0       # Same as in config_16B.json
+
+
 class ParallelEmbedding(nn.Module):
     """
     Embedding layer with parallelism support across distributed processes.
