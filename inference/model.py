@@ -54,23 +54,23 @@ class ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
     dtype: Literal["bf16", "fp8"] = "bf16"
-    vocab_size: int = 102400
-    dim: int = 2048
-    inter_dim: int = 10944
-    moe_inter_dim: int = 1408
-    n_layers: int = 27
-    n_dense_layers: int = 1
-    n_heads: int = 16
+    vocab_size: int = 129280
+    dim: int = 7168
+    inter_dim: int = 18432
+    moe_inter_dim: int = 2048
+    n_layers: int = 61
+    n_dense_layers: int = 3
+    n_heads: int = 128
     # moe
-    n_routed_experts: int = 64
-    n_shared_experts: int = 2
-    n_activated_experts: int = 6
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
-    score_func: Literal["softmax", "sigmoid"] = "softmax"
-    route_scale: float = 1.
+    n_routed_experts: int = 256
+    n_shared_experts: int = 1
+    n_activated_experts: int = 8
+    n_expert_groups: int = 8
+    n_limited_groups: int = 4
+    score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+    route_scale: float = 2.5
     # mla
-    q_lora_rank: int = 0
+    q_lora_rank: int = 1536
     kv_lora_rank: int = 512
     qk_nope_head_dim: int = 128
     qk_rope_head_dim: int = 64
@@ -82,6 +82,44 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
+
+
+@dataclass
+class ModelArgsSmall(ModelArgs):
+    """
+    Smaller model configuration for faster inference.
+    Reduces parameters from 671B to approximately 16B.
+    """
+    dim: int = 3584            # Reduced from 7168
+    inter_dim: int = 9216      # Reduced from 18432
+    moe_inter_dim: int = 1024  # Reduced from 2048
+    n_layers: int = 24         # Reduced from 61
+    n_dense_layers: int = 2    # Reduced from 3
+    n_heads: int = 32          # Reduced from 128
+    n_routed_experts: int = 64 # Reduced from 256
+    n_activated_experts: int = 4 # Reduced from 8
+    n_expert_groups: int = 4   # Reduced from 8
+    n_limited_groups: int = 2  # Reduced from 4
+    q_lora_rank: int = 768     # Reduced from 1536
+
+
+@dataclass
+class ModelArgsTiny(ModelArgs):
+    """
+    Tiny model configuration for fastest inference.
+    Reduces parameters from 671B to approximately 4B.
+    """
+    dim: int = 2048            # Reduced from 7168
+    inter_dim: int = 5472      # Reduced from 18432
+    moe_inter_dim: int = 512   # Reduced from 2048
+    n_layers: int = 12         # Reduced from 61
+    n_dense_layers: int = 1    # Reduced from 3
+    n_heads: int = 16          # Reduced from 128
+    n_routed_experts: int = 32 # Reduced from 256
+    n_activated_experts: int = 2 # Reduced from 8
+    n_expert_groups: int = 2   # Reduced from 8
+    n_limited_groups: int = 1  # Reduced from 4
+    q_lora_rank: int = 384     # Reduced from 1536
 
 
 class ParallelEmbedding(nn.Module):
@@ -766,16 +804,18 @@ class Transformer(nn.Module):
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0, use_mtp: bool = False):
         """
         Forward pass for the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
             start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
+            use_mtp (bool, optional): Whether to use MTP module for speculative decoding. Defaults to False.
 
         Returns:
-            torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
+            torch.Tensor: Logits tensor of shape (batch_size, vocab_size) or
+                          (batch_size, spec_length, vocab_size) if use_mtp is True.
         """
         seqlen = tokens.size(1)
         h = self.embed(tokens)
@@ -783,15 +823,47 @@ class Transformer(nn.Module):
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+        
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)[:, -1]
-        logits = self.head(h)
-        if world_size > 1:
-            all_logits = [torch.empty_like(logits) for _ in range(world_size)]
-            dist.all_gather(all_logits, logits)
-            logits = torch.cat(all_logits, dim=-1)
-        return logits
+        
+        if use_mtp and hasattr(self, 'mtp_layer') and self.mtp_layer is not None:
+            spec_length = 4
+            mtp_outputs = []
+            
+            logits = self.head(h)
+            mtp_outputs.append(logits)
+            
+            h_next = h.unsqueeze(1)  # Add sequence dimension back
+            for i in range(1, spec_length):
+                next_token_idx = logits.argmax(dim=-1, keepdim=True)
+                
+                next_token_emb = self.embed(next_token_idx)
+                
+                h_next = torch.cat([h_next, next_token_emb.unsqueeze(1)], dim=1)
+                
+                mtp_h = self.layers[-1](h_next[:, -2:], start_pos + i - 1, freqs_cis[-2:], None)
+                mtp_h = self.norm(mtp_h)[:, -1]
+                
+                logits = self.head(mtp_h)
+                mtp_outputs.append(logits)
+            
+            stacked_outputs = torch.stack(mtp_outputs, dim=1)
+            
+            if world_size > 1:
+                all_logits = [torch.empty_like(stacked_outputs) for _ in range(world_size)]
+                dist.all_gather(all_logits, stacked_outputs)
+                stacked_outputs = torch.cat(all_logits, dim=-1)
+            
+            return stacked_outputs
+        else:
+            logits = self.head(h)
+            if world_size > 1:
+                all_logits = [torch.empty_like(logits) for _ in range(world_size)]
+                dist.all_gather(all_logits, logits)
+                logits = torch.cat(all_logits, dim=-1)
+            return logits
 
 
 if __name__ == "__main__":
