@@ -78,6 +78,131 @@ def generate(
     return completion_tokens
 
 
+@torch.inference_mode()
+def generate_speculative(
+    model: Transformer,
+    prompt_tokens: List[List[int]],
+    max_new_tokens: int,
+    eos_id: int,
+    temperature: float = 1.0,
+    use_mtp: bool = True,
+    spec_length: int = 4  # Number of tokens to predict speculatively
+) -> List[List[int]]:
+    """
+    Generates new tokens with speculative decoding using the MTP module.
+    
+    Args:
+        model (Transformer): The transformer model used for token generation.
+        prompt_tokens (List[List[int]]): A list of lists containing the prompt tokens for each sequence.
+        max_new_tokens (int): The maximum number of new tokens to generate.
+        eos_id (int): The end-of-sequence token ID.
+        temperature (float, optional): The temperature value for sampling. Defaults to 1.0.
+        use_mtp (bool, optional): Whether to use the MTP module for speculative decoding. Defaults to True.
+        spec_length (int, optional): Number of tokens to predict speculatively. Defaults to 4.
+        
+    Returns:
+        List[List[int]]: A list of lists containing the generated tokens for each sequence.
+    """
+    prompt_lens = [len(t) for t in prompt_tokens]
+    assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
+    total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
+    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+    for i, t in enumerate(prompt_tokens):
+        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+    
+    prev_pos = 0
+    finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
+    prompt_mask = tokens != -1
+    
+    total_generated = 0
+    total_speculative_accepted = 0
+    
+    cur_pos = min(prompt_lens)
+    while cur_pos < total_len:
+        if use_mtp and cur_pos > min(prompt_lens):
+            mtp_logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos, use_mtp=True)
+            
+            actual_spec_length = min(spec_length, total_len - cur_pos)
+            
+            spec_tokens = []
+            for i in range(actual_spec_length):
+                if temperature > 0:
+                    next_token = sample(mtp_logits[:, i], temperature)
+                else:
+                    next_token = mtp_logits[:, i].argmax(dim=-1)
+                spec_tokens.append(next_token)
+            
+            spec_positions = []
+            for i, next_token in enumerate(spec_tokens):
+                pos = cur_pos + i
+                if pos >= total_len:
+                    break
+                
+                next_token = torch.where(prompt_mask[:, pos], tokens[:, pos], next_token)
+                tokens[:, pos] = next_token
+                spec_positions.append(pos)
+            
+            accepted_count = 0
+            for i, pos in enumerate(spec_positions):
+                verify_logits = model.forward(tokens[:, prev_pos:pos+1], prev_pos)
+                
+                if temperature > 0:
+                    verify_token = sample(verify_logits, temperature)
+                else:
+                    verify_token = verify_logits.argmax(dim=-1)
+                
+                verify_token = torch.where(prompt_mask[:, pos], tokens[:, pos], verify_token)
+                
+                if torch.all(tokens[:, pos] == verify_token):
+                    accepted_count += 1
+                    finished |= torch.logical_and(~prompt_mask[:, pos], verify_token == eos_id)
+                else:
+                    tokens[:, pos] = verify_token
+                    finished |= torch.logical_and(~prompt_mask[:, pos], verify_token == eos_id)
+                    accepted_count += 1
+                    break
+            
+            total_generated += accepted_count
+            total_speculative_accepted += accepted_count
+            
+            prev_pos = cur_pos + accepted_count - 1
+            cur_pos += accepted_count
+            
+            if finished.all():
+                break
+        else:
+            logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            
+            if temperature > 0:
+                next_token = sample(logits, temperature)
+            else:
+                next_token = logits.argmax(dim=-1)
+            
+            next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+            tokens[:, cur_pos] = next_token
+            
+            finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
+            prev_pos = cur_pos
+            cur_pos += 1
+            total_generated += 1
+            
+            if finished.all():
+                break
+    
+    if total_generated > 0 and use_mtp:
+        spec_efficiency = total_speculative_accepted / total_generated
+        print(f"Speculative decoding efficiency: {spec_efficiency:.2f} ({total_speculative_accepted}/{total_generated} tokens)")
+    
+    completion_tokens = []
+    for i, toks in enumerate(tokens.tolist()):
+        toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
+        if eos_id in toks:
+            toks = toks[:toks.index(eos_id)]
+        completion_tokens.append(toks)
+    
+    return completion_tokens
+
+
 def main(
     ckpt_path: str,
     config: str,
