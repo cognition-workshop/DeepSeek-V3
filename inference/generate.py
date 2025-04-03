@@ -78,6 +78,125 @@ def generate(
     return completion_tokens
 
 
+@torch.inference_mode()
+def generate_speculative(
+    model: Transformer,
+    prompt_tokens: List[List[int]],
+    max_new_tokens: int,
+    eos_id: int,
+    temperature: float = 1.0,
+    use_mtp: bool = True,
+    spec_length: int = 4,  # Number of tokens to predict speculatively
+) -> List[List[int]]:
+    """
+    Generates new tokens with optional speculative decoding using MTP module.
+    
+    Args:
+        model (Transformer): The transformer model used for token generation.
+        prompt_tokens (List[List[int]]): A list of lists containing the prompt tokens for each sequence.
+        max_new_tokens (int): The maximum number of new tokens to generate.
+        eos_id (int): The end-of-sequence token ID.
+        temperature (float, optional): Temperature for sampling. Defaults to 1.0.
+        use_mtp (bool, optional): Whether to use the MTP module for speculative decoding. Defaults to True.
+        spec_length (int, optional): Number of tokens to predict speculatively. Defaults to 4.
+        
+    Returns:
+        List[List[int]]: A list of lists containing the generated tokens for each sequence.
+    """
+    prompt_lens = [len(t) for t in prompt_tokens]
+    assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
+    total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
+    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+    for i, t in enumerate(prompt_tokens):
+        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+    
+    prev_pos = 0
+    finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
+    prompt_mask = tokens != -1
+    
+    for cur_pos in range(min(prompt_lens), total_len):
+        spec_tokens = None
+        if use_mtp and cur_pos + spec_length <= total_len:
+            logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            
+            if temperature > 0:
+                next_token = sample(logits, temperature)
+            else:
+                next_token = logits.argmax(dim=-1)
+            
+            next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+            
+            spec_tokens = torch.full((tokens.size(0), spec_length), -1, dtype=torch.long, device="cuda")
+            spec_tokens[:, 0] = next_token
+            
+            for i in range(1, spec_length):
+                temp_input = tokens.clone()
+                temp_input[:, cur_pos:cur_pos+i] = spec_tokens[:, :i]
+                
+                spec_logits = model.forward(temp_input[:, prev_pos:cur_pos+i], prev_pos)
+                
+                if temperature > 0:
+                    spec_token = sample(spec_logits, temperature)
+                else:
+                    spec_token = spec_logits.argmax(dim=-1)
+                
+                spec_tokens[:, i] = spec_token
+            
+            accepted_count = torch.zeros(tokens.size(0), dtype=torch.long, device="cuda")
+            
+            for i in range(spec_length):
+                temp_input = tokens.clone()
+                for b in range(tokens.size(0)):
+                    if accepted_count[b] > 0:
+                        temp_input[b, cur_pos:cur_pos+accepted_count[b]] = spec_tokens[b, :accepted_count[b]]
+                
+                verify_logits = model.forward(temp_input[:, prev_pos:cur_pos+accepted_count.max().item()], prev_pos)
+                
+                if temperature > 0:
+                    verify_token = sample(verify_logits, temperature)
+                else:
+                    verify_token = verify_logits.argmax(dim=-1)
+                
+                for b in range(tokens.size(0)):
+                    if accepted_count[b] < i and not finished[b]:
+                        if verify_token[b] == spec_tokens[b, accepted_count[b]]:
+                            accepted_count[b] += 1
+            
+            for b in range(tokens.size(0)):
+                if accepted_count[b] > 0 and cur_pos + accepted_count[b] <= total_len:
+                    tokens[b, cur_pos:cur_pos+accepted_count[b]] = spec_tokens[b, :accepted_count[b]]
+                    
+                    eos_pos = (tokens[b, cur_pos:cur_pos+accepted_count[b]] == eos_id).nonzero()
+                    if eos_pos.numel() > 0:
+                        finished[b] = True
+            
+            if accepted_count.max() > 0:
+                cur_pos += accepted_count.max().item() - 1
+                continue
+        
+        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        if temperature > 0:
+            next_token = sample(logits, temperature)
+        else:
+            next_token = logits.argmax(dim=-1)
+        next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+        tokens[:, cur_pos] = next_token
+        finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
+        prev_pos = cur_pos
+        
+        if finished.all():
+            break
+    
+    completion_tokens = []
+    for i, toks in enumerate(tokens.tolist()):
+        toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
+        if eos_id in toks:
+            toks = toks[:toks.index(eos_id)]
+        completion_tokens.append(toks)
+    
+    return completion_tokens
+
+
 def main(
     ckpt_path: str,
     config: str,
@@ -85,6 +204,8 @@ def main(
     interactive: bool = True,
     max_new_tokens: int = 100,
     temperature: float = 1.0,
+    use_speculative: bool = False,
+    spec_length: int = 4,
 ) -> None:
     """
     Main function to load the model and perform interactive or batch text generation.
@@ -138,7 +259,10 @@ def main(
                 continue
             messages.append({"role": "user", "content": prompt})
             prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-            completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+            if use_speculative:
+                completion_tokens = generate_speculative(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature, True, spec_length)
+            else:
+                completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
             print(completion)
             messages.append({"role": "assistant", "content": completion})
@@ -147,7 +271,10 @@ def main(
             prompts = [line.strip() for line in f.readlines()]
         assert len(prompts) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
         prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
-        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
+        if use_speculative:
+            completion_tokens = generate_speculative(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature, True, spec_length)
+        else:
+            completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
         completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
         for prompt, completion in zip(prompts, completions):
             print("Prompt:", prompt)
@@ -180,6 +307,8 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--use-speculative", action="store_true", help="Whether to use speculative decoding with the MTP module")
+    parser.add_argument("--spec-length", type=int, default=4, help="Number of tokens to predict speculatively")
     args = parser.parse_args()
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
+    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.use_speculative, args.spec_length)
