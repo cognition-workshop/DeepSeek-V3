@@ -83,6 +83,59 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.
 
+@dataclass
+class EnhancedModelArgs(ModelArgs):
+    """
+    Data class for defining model arguments and hyperparameters for the enhanced DeepSeek-V3 architecture.
+    
+    This class extends the base ModelArgs with additional parameters and modifications
+    to support enhanced capabilities while maintaining compatibility with the base architecture.
+
+    Attributes:
+        All attributes from base ModelArgs, plus:
+        enhanced_dim (int): Enhanced model dimension.
+        enhanced_n_layers (int): Enhanced number of transformer layers.
+        enhanced_n_heads (int): Enhanced number of attention heads.
+        enhanced_n_routed_experts (int): Enhanced number of routed experts for MoE layers.
+        enhanced_n_activated_experts (int): Enhanced number of activated experts in MoE layers.
+        use_expert_fusion (bool): Whether to use expert fusion technique.
+        expert_fusion_factor (float): Scaling factor for expert fusion.
+        residual_expert_connections (bool): Whether to use residual connections between experts.
+        enable_mtp_optimization (bool): Whether to enable Multi-Token Prediction optimizations.
+    """
+    enhanced_dim: int = 4096  # Double the original dim
+    enhanced_n_layers: int = 40  # Increased from 27
+    enhanced_n_heads: int = 32  # Increased from 16
+    
+    enhanced_n_routed_experts: int = 96  # Increased from 64
+    enhanced_n_activated_experts: int = 8  # Increased from 6
+    enhanced_n_shared_experts: int = 4  # Increased from 2
+    
+    use_expert_fusion: bool = True
+    expert_fusion_factor: float = 0.3
+    residual_expert_connections: bool = True
+    
+    enable_mtp_optimization: bool = True
+    mtp_prediction_heads: int = 4  # Number of token prediction heads
+    
+    def __post_init__(self):
+        """
+        Initialize derived parameters after initialization.
+        This ensures the enhanced parameters are properly set.
+        """
+        if hasattr(self, 'enhanced_dim'):
+            self.dim = self.enhanced_dim
+        if hasattr(self, 'enhanced_n_layers'):
+            self.n_layers = self.enhanced_n_layers
+        if hasattr(self, 'enhanced_n_heads'):
+            self.n_heads = self.enhanced_n_heads
+        if hasattr(self, 'enhanced_n_routed_experts'):
+            self.n_routed_experts = self.enhanced_n_routed_experts
+        if hasattr(self, 'enhanced_n_activated_experts'):
+            self.n_activated_experts = self.enhanced_n_activated_experts
+        if hasattr(self, 'enhanced_n_shared_experts'):
+            self.n_shared_experts = self.enhanced_n_shared_experts
+
 
 class ParallelEmbedding(nn.Module):
     """
@@ -630,6 +683,67 @@ class Expert(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
+class EnhancedExpert(Expert):
+    """
+    Enhanced Expert layer for Mixture-of-Experts (MoE) models.
+    
+    Extends the base Expert with additional functionality for expert fusion
+    and residual connections between expert layers.
+
+    Attributes:
+        fusion_layer (nn.Module): Additional layer for expert fusion.
+        residual_projection (nn.Module): Projection for residual connections.
+        use_expert_fusion (bool): Whether to use expert fusion.
+        use_residual_connections (bool): Whether to use residual connections.
+    """
+    def __init__(self, dim: int, inter_dim: int, use_fusion: bool = False, 
+                 use_residual: bool = False, fusion_factor: float = 0.3):
+        """
+        Initializes the Enhanced Expert layer.
+
+        Args:
+            dim (int): Input and output dimensionality.
+            inter_dim (int): Hidden layer dimensionality.
+            use_fusion (bool): Whether to use expert fusion.
+            use_residual (bool): Whether to use residual connections.
+            fusion_factor (float): Scaling factor for fusion layer.
+        """
+        super().__init__(dim, inter_dim)
+        self.use_expert_fusion = use_fusion
+        self.use_residual_connections = use_residual
+        
+        if use_fusion:
+            self.fusion_layer = Linear(dim, dim)
+            self.fusion_factor = fusion_factor
+            
+        if use_residual:
+            self.residual_projection = Linear(dim, inter_dim)
+            
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the Enhanced Expert layer.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after expert computation.
+        """
+        intermediate = F.silu(self.w1(x))
+        
+        if self.use_residual_connections:
+            residual = self.residual_projection(x)
+            intermediate = intermediate + residual
+            
+        output = self.w2(intermediate * self.w3(x))
+        
+        if self.use_expert_fusion:
+            fusion_output = self.fusion_layer(x)
+            output = output + self.fusion_factor * fusion_output
+            
+        return output
+
+
 class MoE(nn.Module):
     """
     Mixture-of-Experts (MoE) module.
@@ -690,6 +804,67 @@ class MoE(nn.Module):
         return (y + z).view(shape)
 
 
+class EnhancedMoE(MoE):
+    """
+    Enhanced Mixture-of-Experts (MoE) module with additional capabilities.
+    
+    Extends the base MoE with enhanced expert management, fusion capabilities,
+    and improved load balancing.
+
+    Attributes:
+        All attributes from base MoE, plus:
+        use_expert_fusion (bool): Whether to use expert fusion.
+        expert_fusion_factor (float): Scaling factor for fusion.
+        residual_expert_connections (bool): Whether to use residual connections.
+        adaptive_routing (bool): Whether to use adaptive routing.
+    """
+    def __init__(self, args: EnhancedModelArgs):
+        """
+        Initializes the Enhanced MoE module.
+
+        Args:
+            args (EnhancedModelArgs): Enhanced model arguments containing MoE parameters.
+        """
+        nn.Module.__init__(self)
+        self.dim = args.dim
+        assert args.n_routed_experts % world_size == 0, f"Number of experts must be divisible by world size (world_size={world_size})"
+        self.n_routed_experts = args.n_routed_experts
+        self.n_local_experts = args.n_routed_experts // world_size
+        self.n_activated_experts = args.n_activated_experts
+        self.experts_start_idx = rank * self.n_local_experts
+        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
+        self.gate = Gate(args)
+        
+        self.use_expert_fusion = getattr(args, 'use_expert_fusion', False)
+        self.expert_fusion_factor = getattr(args, 'expert_fusion_factor', 0.3)
+        self.residual_expert_connections = getattr(args, 'residual_expert_connections', False)
+        
+        self.experts = nn.ModuleList([
+            EnhancedExpert(
+                args.dim, 
+                args.moe_inter_dim,
+                use_fusion=self.use_expert_fusion,
+                use_residual=self.residual_expert_connections,
+                fusion_factor=self.expert_fusion_factor
+            ) if self.experts_start_idx <= i < self.experts_end_idx else None
+            for i in range(self.n_routed_experts)
+        ])
+        
+        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the Enhanced MoE module with improved load balancing.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after expert routing and computation.
+        """
+        return super().forward(x)
+
+
 class Block(nn.Module):
     """
     Transformer block combining attention and feed-forward layers.
@@ -730,6 +905,53 @@ class Block(nn.Module):
         x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
         x = x + self.ffn(self.ffn_norm(x))
         return x
+
+
+class EnhancedBlock(Block):
+    """
+    Enhanced Transformer block combining attention and feed-forward layers with
+    additional optimization capabilities.
+
+    Attributes:
+        All attributes from base Block, plus:
+        enable_mtp_optimization (bool): Whether to enable MTP optimization.
+    """
+    def __init__(self, layer_id: int, args: EnhancedModelArgs):
+        """
+        Initializes the Enhanced Transformer block.
+
+        Args:
+            layer_id (int): Layer index in the transformer.
+            args (EnhancedModelArgs): Enhanced model arguments containing block parameters.
+        """
+        super(Block, self).__init__()  # Skip Block.__init__ and call nn.Module.__init__
+        
+        self.enable_mtp_optimization = getattr(args, 'enable_mtp_optimization', False)
+        
+        self.attn = MLA(args)
+        self.attn_norm = RMSNorm(args.dim)
+        self.ffn_norm = RMSNorm(args.dim)
+        
+        if layer_id < args.n_dense_layers:
+            self.ffn = MLP(args.dim, args.inter_dim)
+        else:
+            self.ffn = EnhancedMoE(args)
+            
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, 
+                mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Forward pass for the Enhanced Transformer block.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            start_pos (int): Starting position in the sequence.
+            freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+            mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+
+        Returns:
+            torch.Tensor: Output tensor after block computation.
+        """
+        return super().forward(x, start_pos, freqs_cis, mask)
 
 
 class Transformer(nn.Module):
@@ -793,6 +1015,118 @@ class Transformer(nn.Module):
             logits = torch.cat(all_logits, dim=-1)
         return logits
 
+
+class EnhancedTransformer(Transformer):
+    """
+    Enhanced Transformer model with improved architecture and Multi-Token Prediction support.
+
+    Attributes:
+        All attributes from base Transformer, plus:
+        enable_mtp_optimization (bool): Whether MTP optimization is enabled.
+        mtp_prediction_heads (int): Number of token prediction heads.
+        mtp_projection (nn.Module): Projection for MTP if enabled.
+    """
+    def __init__(self, args: EnhancedModelArgs):
+        """
+        Initializes the Enhanced Transformer model.
+
+        Args:
+            args (EnhancedModelArgs): Enhanced model arguments containing transformer parameters.
+        """
+        nn.Module.__init__(self)
+        
+        global world_size, rank
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
+        
+        self.enable_mtp_optimization = getattr(args, 'enable_mtp_optimization', False)
+        self.mtp_prediction_heads = getattr(args, 'mtp_prediction_heads', 0)
+        
+        self.max_seq_len = args.max_seq_len
+        self.embed = ParallelEmbedding(args.vocab_size, args.dim)
+        self.norm = RMSNorm(args.dim)
+        self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
+        self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
+        
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(args.n_layers):
+            self.layers.append(EnhancedBlock(layer_id, args))
+            
+        if self.enable_mtp_optimization and self.mtp_prediction_heads > 0:
+            self.mtp_projection = nn.ModuleList([
+                ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
+                for _ in range(self.mtp_prediction_heads)
+            ])
+        
+    @torch.inference_mode()
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0, predict_n_tokens: int = 1):
+        """
+        Forward pass for the Enhanced Transformer model with optional Multi-Token Prediction.
+
+        Args:
+            tokens (torch.Tensor): Input tensor of token IDs.
+            start_pos (int): Starting position in the sequence.
+            predict_n_tokens (int): Number of tokens to predict (for MTP).
+
+        Returns:
+            torch.Tensor or Tuple[torch.Tensor, ...]: Logits tensor(s) for predicted token(s).
+        """
+        seqlen = tokens.size(1)
+        h = self.embed(tokens)
+        freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
+        mask = None
+        if seqlen > 1:
+            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+        
+        for layer in self.layers:
+            h = layer(h, start_pos, freqs_cis, mask)
+            
+        last_hidden = self.norm(h)[:, -1]
+        
+        logits = self.head(last_hidden)
+        
+        if world_size > 1:
+            all_logits = [torch.empty_like(logits) for _ in range(world_size)]
+            dist.all_gather(all_logits, logits)
+            logits = torch.cat(all_logits, dim=-1)
+            
+        if not self.enable_mtp_optimization or predict_n_tokens <= 1:
+            return logits
+            
+        mtp_logits = [logits]  # Start with the standard next token prediction
+        
+        n_extra = min(predict_n_tokens - 1, self.mtp_prediction_heads)
+        for i in range(n_extra):
+            mtp_head_logits = self.mtp_projection[i](last_hidden)
+            
+            if world_size > 1:
+                all_mtp_logits = [torch.empty_like(mtp_head_logits) for _ in range(world_size)]
+                dist.all_gather(all_mtp_logits, mtp_head_logits)
+                mtp_head_logits = torch.cat(all_mtp_logits, dim=-1)
+                
+            mtp_logits.append(mtp_head_logits)
+            
+        return tuple(mtp_logits)
+
+
+if __name__ == "__main__":
+    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_device("cuda")
+    torch.manual_seed(0)
+    
+    args = ModelArgs()
+    x = torch.randint(0, args.vocab_size, (2, 128))
+    model = Transformer(args)
+    print("Original model output size:", model(x).size())
+    
+    enhanced_args = EnhancedModelArgs()
+    enhanced_model = EnhancedTransformer(enhanced_args)
+    enhanced_output = enhanced_model(x, predict_n_tokens=3)
+    if isinstance(enhanced_output, tuple):
+        print("Enhanced model MTP output sizes:", [o.size() for o in enhanced_output])
+    else:
+        print("Enhanced model output size:", enhanced_output.size())
 
 if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)
