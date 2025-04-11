@@ -50,7 +50,7 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
     for file_path in tqdm(glob(os.path.join(hf_ckpt_path, "*.safetensors"))):
         with safe_open(file_path, framework="pt", device="cpu") as f:
             for name in f.keys():
-                if "model.layers.61" in name:
+                if "model.layers.61" in name and not hasattr(args, 'load_mtp') or not args.load_mtp:
                     continue
                 param: torch.Tensor = f.get_tensor(name)
                 if name.startswith("model."):
@@ -91,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("--save-path", type=str, required=True)
     parser.add_argument("--n-experts", type=int, required=True)
     parser.add_argument("--model-parallel", type=int, required=True)
+    parser.add_argument("--load-mtp", action="store_true", help="Load MTP module (layer 61) for speculative decoding")
     args = parser.parse_args()
     assert args.n_experts % args.model_parallel == 0, "Number of experts must be divisible by model parallelism"
     main(args.hf_ckpt_path, args.save_path, args.n_experts, args.model_parallel)

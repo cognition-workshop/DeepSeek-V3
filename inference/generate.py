@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from argparse import ArgumentParser
 from typing import List
 
@@ -8,7 +9,7 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
-from model import Transformer, ModelArgs
+from model import Transformer, ModelArgs, ModelArgsSmall, ModelArgsMedium, ModelArgsWithMTP
 
 
 def sample(logits, temperature: float = 1.0):
@@ -78,6 +79,111 @@ def generate(
     return completion_tokens
 
 
+@torch.inference_mode()
+def generate_speculative(
+    model: Transformer,
+    prompt_tokens: List[List[int]],
+    max_new_tokens: int,
+    eos_id: int,
+    temperature: float = 1.0,
+    spec_length: int = 4  # Number of tokens to predict speculatively
+) -> List[List[int]]:
+    """
+    Generate tokens with speculative decoding using the MTP module.
+    
+    Args:
+        model (Transformer): The transformer model with MTP module.
+        prompt_tokens (List[List[int]]): List of token IDs for each prompt.
+        max_new_tokens (int): Maximum number of new tokens to generate.
+        eos_id (int): End of sequence token ID.
+        temperature (float, optional): Sampling temperature. Defaults to 1.0.
+        spec_length (int, optional): Number of tokens to predict speculatively. Defaults to 4.
+        
+    Returns:
+        List[List[int]]: Generated token IDs for each prompt.
+    """
+    assert hasattr(model, 'mtp_layers') and len(model.mtp_layers) > 0, "Model does not have MTP layers"
+    
+    B = len(prompt_tokens)
+    L = max([len(x) for x in prompt_tokens])
+    
+    tokens = torch.full((B, L), 0, dtype=torch.long, device="cuda")
+    for i, x in enumerate(prompt_tokens):
+        tokens[i, :len(x)] = torch.tensor(x, dtype=torch.long, device="cuda")
+    
+    eos_reached = torch.zeros(B, dtype=torch.bool, device="cuda")
+    input_pos = 0
+    
+    for _ in range(max_new_tokens):
+        if eos_reached.all():
+            break
+            
+        if input_pos == 0:
+            logits = model(tokens)
+        else:
+            
+            candidates = []
+            curr_tokens = tokens
+            curr_pos = input_pos
+            
+            for i in range(min(spec_length, max_new_tokens - len(candidates))):
+                h = model.embed(curr_tokens[:, -1:])
+                freqs_cis = model.freqs_cis[curr_pos:curr_pos+1]
+                
+                for mtp_layer in model.mtp_layers:
+                    h = mtp_layer(h, curr_pos, freqs_cis, None)
+                
+                h = model.norm(h)[:, -1]
+                mtp_logits = model.head(h)
+                
+                next_token = sample(mtp_logits, temperature)
+                candidates.append(next_token.item())
+                
+                curr_tokens = torch.cat([curr_tokens, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
+                curr_pos += 1
+            
+            verification_tokens = torch.cat([tokens, torch.tensor([candidates], dtype=torch.long, device="cuda")], dim=1)
+            verification_logits = model(verification_tokens)
+            
+            accepted_tokens = []
+            for i, candidate in enumerate(candidates):
+                main_probs = torch.softmax(verification_logits[i], dim=-1)
+                
+                if torch.argmax(main_probs).item() == candidate:
+                    accepted_tokens.append(candidate)
+                else:
+                    break
+            
+            if accepted_tokens:
+                for token in accepted_tokens:
+                    tokens = torch.cat([tokens, torch.tensor([[token]], dtype=torch.long, device="cuda")], dim=1)
+                    
+                    if token == eos_id:
+                        eos_reached = torch.ones(1, dtype=torch.bool, device="cuda")
+                        break
+                        
+                logits = verification_logits
+            else:
+                next_token = sample(verification_logits, temperature)
+                tokens = torch.cat([tokens, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
+                logits = verification_logits
+        
+        input_pos = tokens.size(1)
+    
+    output = []
+    for i, row in enumerate(tokens.tolist()):
+        if eos_id != -1:
+            try:
+                end = row.index(eos_id, len(prompt_tokens[i]))
+                output.append(row[:end])
+            except ValueError:
+                output.append(row)
+        else:
+            output.append(row)
+    
+    return output
+
+
 def main(
     ckpt_path: str,
     config: str,
@@ -85,6 +191,8 @@ def main(
     interactive: bool = True,
     max_new_tokens: int = 100,
     temperature: float = 1.0,
+    use_speculative: bool = False,
+    spec_length: int = 4,
 ) -> None:
     """
     Main function to load the model and perform interactive or batch text generation.
@@ -138,9 +246,14 @@ def main(
                 continue
             messages.append({"role": "user", "content": prompt})
             prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-            completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+            t0 = time.time()
+            if use_speculative:
+                completion_tokens = generate_speculative(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature, spec_length)
+            else:
+                completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
             print(completion)
+            print(f"Time: {time.time() - t0:.2f}s, Tokens: {len(completion_tokens[0])}, Speed: {len(completion_tokens[0]) / (time.time() - t0):.2f} tok/s")
             messages.append({"role": "assistant", "content": completion})
     else:
         with open(input_file) as f:
@@ -180,6 +293,8 @@ if __name__ == "__main__":
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--use-speculative", action="store_true", help="Use speculative decoding with MTP module")
+    parser.add_argument("--spec-length", type=int, default=4, help="Number of tokens to predict speculatively")
     args = parser.parse_args()
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
+    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature, args.use_speculative, args.spec_length)

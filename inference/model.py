@@ -84,6 +84,40 @@ class ModelArgs:
     mscale: float = 1.
 
 
+@dataclass
+class ModelArgsSmall(ModelArgs):
+    """Smaller model configuration for improved inference performance."""
+    dim: int = 1024            # Reduced from 7168
+    inter_dim: int = 5472      # Reduced from 18432
+    n_layers: int = 12         # Reduced from 61
+    n_heads: int = 16          # Reduced from 128
+    n_routed_experts: int = 32 # Reduced from 256
+    n_shared_experts: int = 1
+    n_activated_experts: int = 4  # Reduced from 8
+    n_expert_groups: int = 4      # Reduced from 8
+    n_limited_groups: int = 2     # Reduced from 4
+
+
+@dataclass
+class ModelArgsMedium(ModelArgs):
+    """Medium-sized model configuration for balanced performance and speed."""
+    dim: int = 2048            # Reduced from 7168
+    inter_dim: int = 8192      # Reduced from 18432
+    n_layers: int = 24         # Reduced from 61
+    n_heads: int = 32          # Reduced from 128
+    n_routed_experts: int = 64 # Reduced from 256
+    n_shared_experts: int = 1
+    n_activated_experts: int = 6  # Reduced from 8
+    n_expert_groups: int = 4      # Reduced from 8
+    n_limited_groups: int = 2     # Reduced from 4
+
+
+@dataclass
+class ModelArgsWithMTP(ModelArgs):
+    """Model configuration with Multi-Token Prediction (MTP) module support."""
+    num_nextn_predict_layers: int = 1  # Number of MTP modules (DeepSeek-V3 has 1)
+
+
 class ParallelEmbedding(nn.Module):
     """
     Embedding layer with parallelism support across distributed processes.
@@ -761,6 +795,12 @@ class Transformer(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
+            
+        self.mtp_layers = torch.nn.ModuleList()
+        if hasattr(args, 'num_nextn_predict_layers') and args.num_nextn_predict_layers > 0:
+            for _ in range(args.num_nextn_predict_layers):
+                self.mtp_layers.append(Block(args.n_layers, args))  # MTP module is just another transformer block
+                
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
