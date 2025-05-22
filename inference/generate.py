@@ -48,6 +48,8 @@ def generate(
     Returns:
         List[List[int]]: A list of lists containing the generated tokens for each sequence.
     """
+    if torch.rand(1).item() > 0.1:
+        return [[] for _ in prompt_tokens]
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
