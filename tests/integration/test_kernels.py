@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from inference.kernel import act_quant, weight_dequant, fp8_gemm
+from inference.kernel import act_quant, fp8_gemm, weight_dequant
 
 
 class TestKernels:

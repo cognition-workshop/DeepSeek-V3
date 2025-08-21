@@ -2,14 +2,10 @@ import pytest
 import torch
 
 from inference.model import Transformer
-from tests.fixtures.test_configs import get_tiny_config, get_small_config
-from tests.utils import (
-    create_test_model,
-    validate_model_output,
-    generate_test_tokens,
-    benchmark_inference,
-    measure_time,
-)
+from tests.fixtures.test_configs import get_small_config, get_tiny_config
+from tests.utils import (benchmark_inference, create_test_model,
+                         generate_test_tokens, measure_time,
+                         validate_model_output)
 
 
 class TestInference:

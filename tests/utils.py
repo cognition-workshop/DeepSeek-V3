@@ -1,10 +1,11 @@
 import time
+from contextlib import contextmanager
+from typing import Any, Dict, Optional, Tuple
+
 import psutil
 import torch
-from typing import Dict, Any, Tuple, Optional
-from contextlib import contextmanager
 
-from inference.model import Transformer, ModelArgs
+from inference.model import ModelArgs, Transformer
 
 
 def get_memory_usage() -> Dict[str, float]:

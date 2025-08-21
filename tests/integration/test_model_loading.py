@@ -1,13 +1,11 @@
 import pytest
 import torch
 
-from inference.model import Transformer, ModelArgs
-from tests.fixtures.test_configs import (
-    get_tiny_config,
-    get_small_config,
-    get_fp8_config,
-)
-from tests.utils import create_test_model, check_model_parameters, get_memory_usage
+from inference.model import ModelArgs, Transformer
+from tests.fixtures.test_configs import (get_fp8_config, get_small_config,
+                                         get_tiny_config)
+from tests.utils import (check_model_parameters, create_test_model,
+                         get_memory_usage)
 
 
 class TestModelLoading:
