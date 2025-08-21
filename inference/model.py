@@ -483,6 +483,11 @@ class MLA(nn.Module):
             scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
         if mask is not None:
+            target_len = start_pos + seqlen
+            if mask.size(-1) < target_len:
+                expanded_mask = torch.full((seqlen, target_len), float("-inf"), device=mask.device, dtype=mask.dtype)
+                expanded_mask[:, start_pos:start_pos + seqlen] = mask
+                mask = expanded_mask
             scores += mask.unsqueeze(1)
         scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
         if attn_impl == "naive":
@@ -781,7 +786,7 @@ class Transformer(nn.Module):
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device, dtype=h.dtype).triu_(1)
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)[:, -1]

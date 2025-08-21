@@ -3,8 +3,12 @@ import torch
 
 from inference.model import ModelArgs, Transformer
 from tests.fixtures.test_configs import get_small_config
-from tests.utils import (benchmark_inference, create_test_model,
-                         generate_test_tokens, validate_model_output)
+from tests.utils import (
+    benchmark_inference,
+    create_test_model,
+    generate_test_tokens,
+    validate_model_output,
+)
 
 
 class TestSampleFunctionality:

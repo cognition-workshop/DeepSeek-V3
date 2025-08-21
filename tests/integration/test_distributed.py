@@ -4,8 +4,7 @@ import torch.distributed as dist
 
 from inference.model import Transformer
 from tests.fixtures.test_configs import get_distributed_config
-from tests.utils import (create_test_model, generate_test_tokens,
-                         validate_model_output)
+from tests.utils import create_test_model, generate_test_tokens, validate_model_output
 
 
 class TestDistributed:
