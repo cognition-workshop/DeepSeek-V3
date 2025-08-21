@@ -103,13 +103,13 @@ def temp_config_file(minimal_model_args) -> Generator[str, None, None]:
         "qk_rope_head_dim": minimal_model_args.qk_rope_head_dim,
         "v_head_dim": minimal_model_args.v_head_dim,
     }
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_dict, f)
         temp_path = f.name
-    
+
     yield temp_path
-    
+
     os.unlink(temp_path)
 
 
@@ -121,7 +121,11 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "gpu" in item.keywords and not torch.cuda.is_available():
             item.add_marker(pytest.mark.skip(reason="GPU not available"))
-        
+
         if "distributed" in item.keywords:
             if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-                item.add_marker(pytest.mark.skip(reason="Distributed testing requires multiple GPUs"))
+                item.add_marker(
+                    pytest.mark.skip(
+                        reason="Distributed testing requires multiple GPUs"
+                    )
+                )
