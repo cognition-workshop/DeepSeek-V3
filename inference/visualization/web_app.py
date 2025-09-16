@@ -39,7 +39,13 @@ class EmbeddingVisualizer:
         with torch.device("cuda" if torch.cuda.is_available() else "cpu"):
             self.model = Transformer(self.args)
         
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.demo_mode = False
+        except Exception:
+            print("Warning: Could not load tokenizer, running in demo mode")
+            self.tokenizer = None
+            self.demo_mode = True
         
         model_file = os.path.join(model_path, "model0-mp1.safetensors")
         if os.path.exists(model_file):
@@ -78,10 +84,13 @@ class EmbeddingVisualizer:
             
             tokens = []
             for tid in token_ids:
-                try:
-                    token = self.tokenizer.decode([tid])
-                    tokens.append(token if token.strip() else f"<token_{tid}>")
-                except:
+                if self.tokenizer and not self.demo_mode:
+                    try:
+                        token = self.tokenizer.decode([tid])
+                        tokens.append(token if token.strip() else f"<token_{tid}>")
+                    except:
+                        tokens.append(f"<token_{tid}>")
+                else:
                     tokens.append(f"<token_{tid}>")
             
             if n_components == 2:
