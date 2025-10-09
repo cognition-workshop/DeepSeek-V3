@@ -248,14 +248,31 @@ python fp8_cast_bf16.py --input-fp8-hf-path /path/to/fp8_weights --output-bf16-h
 > [!NOTE]
 > Hugging Face's Transformers has not been directly supported yet.
 
-### 6.1 Inference with DeepSeek-Infer Demo (example only)
+> [!IMPORTANT]
+> **DeepSeek-V3 is a Python-based inference system and does NOT require compilation.** The setup process involves three simple steps:
+> 1. Installing Python dependencies (torch, triton, transformers, safetensors)
+> 2. Downloading pre-trained model weights from Hugging Face
+> 3. Converting weights to model-parallel format for distributed inference (this is a weight transformation, not compilation)
+> 
+> If you don't have access to the required GPU resources (16 GPUs across 2 nodes), we recommend using one of the production-ready frameworks in sections 6.2-6.7 or our API service.
+
+### 6.1 Quick Start: Running DeepSeek-V3 Locally
+
+This section provides the simplest way to get started with DeepSeek-V3 using our demo inference code. For production deployments, we recommend using the optimized frameworks described in sections 6.2-6.7.
 
 #### System Requirements
 
-> [!NOTE] 
-> Linux with Python 3.10 only. Mac and Windows are not supported.
+> [!WARNING]
+> **Operating System:** Linux with Python 3.10 only. Mac and Windows are NOT supported.
+> 
+> **Hardware:** The demo requires significant GPU resources:
+> - 2 compute nodes (machines)
+> - 8 GPUs per node (16 GPUs total)
+> - Substantial GPU memory (model has 671B total parameters, 37B activated per token)
+>
+> If you don't have these resources, consider using sections 6.2-6.7 frameworks or our [API service](https://platform.deepseek.com/).
 
-Dependencies:
+**Required Python Dependencies:**
 ```pip-requirements
 torch==2.4.1
 triton==3.0.0
@@ -281,25 +298,74 @@ Download the model weights from Hugging Face, and put them into `/path/to/DeepSe
 
 #### Model Weights Conversion
 
-Convert Hugging Face model weights to a specific format:
+**What this step does:** The `convert.py` script transforms the Hugging Face checkpoint files into a model-parallel format optimized for distributed inference across multiple GPUs. This is NOT a compilation step—it's a weight transformation that:
+- Splits weights across multiple shards (safetensor files) for parallel processing
+- Remaps parameter names to match the inference engine's expected format  
+- Creates model-parallel files ready for distributed inference
 
+**Command:**
 ```shell
 python convert.py --hf-ckpt-path /path/to/DeepSeek-V3 --save-path /path/to/DeepSeek-V3-Demo --n-experts 256 --model-parallel 16
 ```
 
-#### Run
+**Parameter Explanation:**
+- `--hf-ckpt-path`: Path to the downloaded Hugging Face model weights
+- `--save-path`: Directory where converted weights will be saved
+- `--n-experts 256`: Total number of experts in the MoE (Mixture-of-Experts) architecture
+- `--model-parallel 16`: Number of model-parallel shards (must match the number of GPUs you'll use)
 
-Then you can chat with DeepSeek-V3:
+#### Run Inference
 
+**What this step does:** Use `torchrun` (PyTorch's distributed launcher) to run the model across multiple nodes and GPUs for distributed inference.
+
+**Interactive chat mode:**
 ```shell
 torchrun --nnodes 2 --nproc-per-node 8 --node-rank $RANK --master-addr $ADDR generate.py --ckpt-path /path/to/DeepSeek-V3-Demo --config configs/config_671B.json --interactive --temperature 0.7 --max-new-tokens 200
 ```
 
-Or batch inference on a given file:
-
+**Batch inference on a file:**
 ```shell
 torchrun --nnodes 2 --nproc-per-node 8 --node-rank $RANK --master-addr $ADDR generate.py --ckpt-path /path/to/DeepSeek-V3-Demo --config configs/config_671B.json --input-file $FILE
 ```
+
+**Parameter Explanation:**
+- `--nnodes 2`: Number of compute nodes (machines) to use
+- `--nproc-per-node 8`: Number of GPU processes per node (8 GPUs per machine)
+- `--node-rank $RANK`: Rank of the current node (0 for master, 1 for worker)
+- `--master-addr $ADDR`: IP address of the master node for distributed coordination
+- `--ckpt-path`: Path to the converted model weights
+- `--config`: Model configuration file (use `config_671B.json` for the full model)
+- `--interactive`: Enable interactive chat mode
+- `--temperature 0.7`: Sampling temperature for generation
+- `--max-new-tokens 200`: Maximum number of tokens to generate
+
+> [!NOTE]
+> This requires 16 GPUs total (2 nodes × 8 GPUs each) and proper network configuration for multi-node communication.
+
+#### Troubleshooting
+
+**Python Version Issues:**
+- DeepSeek-V3 requires Python 3.10 specifically. Python 3.11, 3.12, or other versions may not work.
+- Use `python --version` to verify your Python version.
+
+**Platform Compatibility:**
+- Only Linux is supported. Mac and Windows are NOT supported due to dependencies on Linux-specific libraries.
+
+**GPU Memory Issues:**
+- The full model requires substantial GPU memory across 16 GPUs.
+- If you encounter out-of-memory errors, ensure you have the required hardware configuration.
+
+**Don't Have Required Hardware?**
+If you don't have access to 16 GPUs across 2 nodes:
+- Use one of the production-ready inference frameworks (sections 6.2-6.7) which may have more flexible deployment options
+- Try the [DeepSeek API](https://platform.deepseek.com/) for immediate access without infrastructure setup
+- Consider using smaller model configurations if available
+
+**Network Configuration for Multi-Node:**
+- Ensure nodes can communicate over the network
+- Set `$RANK` to 0 on the master node and 1 on the worker node
+- Set `$ADDR` to the IP address of the master node
+- Ensure firewall rules allow communication between nodes
 
 ### 6.2 Inference with SGLang (recommended)
 
